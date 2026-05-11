@@ -784,20 +784,9 @@ def main() -> None:
 
     # ── TAB 1 ──────────────────────────────────────────────
     with tab_single:
-        # Bind text input directly to session state so it persists across reruns
+        # Pre-fill box when an example is clicked
         if "addr_val" not in st.session_state:
             st.session_state.addr_val = ""
-
-        col_in, col_btn = st.columns([6, 1])
-        with col_in:
-            addr_input = st.text_input(
-                "Address",
-                key="addr_val",
-                placeholder="e.g. Rua Ataíde Ferreira, Pavuna, Rio de Janeiro, RJ  or just the CEP",
-                label_visibility="collapsed",
-            )
-        with col_btn:
-            run = st.button("Analyze →", type="primary", use_container_width=True)
 
         st.markdown("**Quick examples:**")
         cols = st.columns(len(EXAMPLES))
@@ -806,9 +795,19 @@ def main() -> None:
                 label = ex[:28] + "…" if len(ex) > 28 else ex
                 if st.button(label, key=f"ex{i}", use_container_width=True, help=ex):
                     st.session_state.addr_val = ex
-                    st.rerun()
+
+        # Form ensures input + button are always submitted together
+        with st.form("address_form", clear_on_submit=False):
+            addr_input = st.text_input(
+                "Address",
+                value=st.session_state.addr_val,
+                placeholder="e.g. Rua Ataíde Ferreira, Pavuna, Rio de Janeiro, RJ  or just the CEP",
+                label_visibility="collapsed",
+            )
+            run = st.form_submit_button("Analyze →", type="primary", use_container_width=False)
 
         if run and addr_input:
+            st.session_state.addr_val = addr_input  # persist typed value
             with st.spinner("Fetching data and scoring…"):
                 res = analyze_address(addr_input)
             st.session_state.last_result = res
