@@ -2,38 +2,32 @@
 Brazil Address Risk Bot
 =======================
 Analyzes Brazilian addresses for:
-  - Socioeconomic Status (IBGE + neighborhood heuristics)
+  - Socioeconomic Status (IBGE + neighbourhood heuristics)
   - Logistics Risk (Área de Risco detection)
   - Fraud Risk (composite score)
   - Approval Recommendation
 
-Data Sources:
-  - ViaCEP (https://viacep.com.br)        — free, no key needed
-  - IBGE API (https://servicodados.ibge.gov.br) — free, no key needed
-  - Nominatim / OpenStreetMap             — free, no key needed
+Data Sources (all free, no API key needed):
+  - ViaCEP            https://viacep.com.br
+  - IBGE Sidra API    https://servicodados.ibge.gov.br
+  - Nominatim / OSM   https://nominatim.openstreetmap.org
+  - Map tiles         OpenStreetMap (via Leaflet.js)
+  - Street View       Google Maps (link out)
 """
 
 import re
 import time
-import json
 import unicodedata
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List
-
-
-def normalize(text: str) -> str:
-    """Remove accents and lowercase — so 'Alemão' == 'alemao'."""
-    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
+from urllib.parse import quote_plus
 
 import streamlit as st
 import requests
 import pandas as pd
-import folium
-from streamlit_folium import st_folium
+import streamlit.components.v1 as components
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
+# ── page config ──────────────────────────────────────────────
 st.set_page_config(
     page_title="🇧🇷 Brazil Address Risk Bot",
     page_icon="🇧🇷",
@@ -42,66 +36,81 @@ st.set_page_config(
 )
 
 # ============================================================
-# RISK DATA
+# HELPERS
 # ============================================================
 
-# All keyword lists are pre-normalized (no accents, lowercase)
-# so matching works regardless of how the user types the address.
+def normalize(text: str) -> str:
+    """Strip accents + lowercase. 'Alemão' → 'alemao'."""
+    return (
+        unicodedata.normalize("NFKD", str(text))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+        .strip()
+    )
+
+
+# ============================================================
+# RISK DATA  (all keywords pre-normalised)
+# ============================================================
+
 HIGH_RISK_KEYWORDS: List[str] = [normalize(k) for k in [
+    # Generic
     "favela", "comunidade", "complexo do", "morro do", "morro da", "morro de",
-    "area de risco", "loteamento irregular", "invasao",
+    "area de risco", "loteamento irregular", "invasao", "ocupacao irregular",
     # RJ
-    "rocinha", "alemao", "manguinhos", "mare", "jacarezinho", "jacare",
+    "rocinha", "alemao", "manguinhos", "mare", "jacarezinho", "jacare favela",
     "acari", "mandela", "cidade de deus", "cidade alta", "vigario geral",
     "parada de lucas", "serrinha", "dendê", "grotao",
-    "caramujo", "fallet", "fogueteiro", "santa marta favela", "tabajara",
-    "cantagalo favela", "pavaozinho", "vila kennedy", "vila alianca",
-    "nova brasilia rj", "parque uniao rj", "nova holanda",
-    "ramos favela", "barreira do vasco", "chatuba",
+    "caramujo", "fallet", "fogueteiro", "tabajara", "cantagalo favela",
+    "pavaozinho", "vila kennedy", "vila alianca rj",
+    "nova brasilia rj", "parque uniao rj", "nova holanda rj",
+    "chatuba", "barreira do vasco",
     # SP
     "heliopolis", "paraisopolis", "jardim angela", "capao redondo",
     "mboi mirim", "brasilandia", "cidade tiradentes", "jardim campo limpo",
+    # General
+    "sem logradouro", "s/n favela",
 ]]
 
-RESTRICTED_DELIVERY_BAIRROS: List[str] = [normalize(k) for k in [
-    # RJ
-    "pavuna", "acari", "anchieta", "bangu", "realengo", "paciencia",
-    "santa cruz rj", "cosmos rj", "senador vasconcelos", "inhoaiba",
-    "pedra de guaratiba", "sepetiba", "madureira", "oswaldo cruz rj",
-    "quintino bocaiuva", "bento ribeiro", "campinho rj", "cascadura",
+RESTRICTED_BAIRROS: List[str] = [normalize(k) for k in [
+    # RJ peripheral / restricted delivery
+    "pavuna", "anchieta rj", "bangu", "realengo", "paciencia rj",
+    "senador vasconcelos", "inhoaiba", "pedra de guaratiba",
+    "sepetiba", "madureira", "oswaldo cruz rj", "quintino bocaiuva",
+    "bento ribeiro", "campinho rj", "cascadura",
     "honorio gurgel", "iraja", "piedade rj", "pilares rj",
-    "vicente de carvalho rj", "vila da penha", "turiacu", "vaz lobo",
-    "costa barros", "cordovil rj", "penha rj",
+    "vicente de carvalho rj", "vila da penha rj", "turiacu",
+    "vaz lobo", "costa barros", "cordovil rj", "penha rj",
+    "acari", "coelho neto rj", "barros filho",
     # SP
-    "jardim angela", "capao redondo", "cidade tiradentes", "guaianazes",
-    "lajeado sp", "sapopemba", "jardim helena sp", "itaim paulista",
-    "parelheiros", "grajau sp",
+    "guaianazes", "lajeado sp", "sapopemba", "itaim paulista",
+    "parelheiros", "grajau sp", "jardim helena sp",
 ]]
 
 PRESTIGIOUS_KEYWORDS: List[str] = [normalize(k) for k in [
     # RJ
     "ipanema", "leblon", "gavea", "lagoa rodrigo de freitas",
-    "barra da tijuca", "botafogo", "urca", "sao conrado",
-    "joatinga", "itanhanga", "recreio dos bandeirantes",
+    "barra da tijuca", "botafogo rj", "urca rj", "sao conrado rj",
+    "joatinga", "itanhanga rj", "recreio dos bandeirantes",
     # SP
-    "jardins sp", "jardim paulista", "jardim europa",
-    "higienopolis", "itaim bibi", "vila nova conceicao",
-    "moema", "brooklin", "alphaville sp",
+    "jardins sp", "jardim paulista sp", "jardim europa sp",
+    "higienopolis sp", "itaim bibi", "vila nova conceicao",
+    "moema sp", "brooklin sp", "alphaville sp",
     # BH
     "savassi", "lourdes bh", "belvedere bh", "mangabeiras bh",
     # Curitiba
-    "batel", "agua verde curitiba",
+    "batel cwb", "agua verde cwb",
 ]]
 
-# State baseline logistics/fraud risk
 STATE_RISK: Dict[str, str] = {
-    "RJ": "high", "ES": "high",
+    "RJ": "high",  "ES": "high",
     "BA": "medium", "PE": "medium", "CE": "medium",
     "PA": "medium", "AM": "medium", "MA": "medium",
-    "AL": "medium", "SE": "medium",
-    "SP": "medium_low", "MG": "medium_low",
+    "AL": "medium", "SE": "medium", "PI": "medium",
+    "SP": "medium_low", "MG": "medium_low", "RN": "medium_low",
     "GO": "low", "DF": "low", "RS": "low",
-    "SC": "low", "PR": "low", "MT": "low", "MS": "low",
+    "SC": "low",  "PR": "low",  "MT": "low", "MS": "low",
 }
 
 SOCIOECONOMIC_META: Dict[str, Dict] = {
@@ -120,89 +129,55 @@ RISK_COLORS: Dict[str, str] = {
     "High":        "#e74c3c",
 }
 
+
 # ============================================================
 # API LAYER
 # ============================================================
 
 def extract_cep(text: str) -> Optional[str]:
-    """Extract an 8-digit CEP from arbitrary text."""
-    match = re.search(r"\b(\d{5})-?(\d{3})\b", text)
-    return match.group(1) + match.group(2) if match else None
+    m = re.search(r"\b(\d{5})-?(\d{3})\b", text)
+    return m.group(1) + m.group(2) if m else None
 
 
 def lookup_cep(cep: str) -> Optional[Dict]:
-    """
-    Fetch address data from ViaCEP.
-    Returns a dict with keys: cep, logradouro, bairro, localidade, uf, ibge
-    """
-    cep_clean = re.sub(r"\D", "", cep)
-    if len(cep_clean) != 8:
-        return None
     try:
-        r = requests.get(
-            f"https://viacep.com.br/ws/{cep_clean}/json/",
-            timeout=10,
-        )
-        data = r.json()
-        return None if "erro" in data else data
+        r = requests.get(f"https://viacep.com.br/ws/{cep}/json/", timeout=10)
+        d = r.json()
+        return None if "erro" in d else d
     except Exception:
         return None
 
 
 def geocode_address(address_str: str) -> Optional[Tuple[float, float]]:
-    """
-    Geocode a Brazilian address using Nominatim (OpenStreetMap).
-    Returns (lat, lon) or None.
-    """
     if "brazil" not in address_str.lower() and "brasil" not in address_str.lower():
         address_str += ", Brazil"
-
-    headers = {"User-Agent": "BrazilAddressRiskBot/1.0 (riskified.com)"}
-    params = {
-        "q": address_str,
-        "format": "json",
-        "limit": 1,
-        "countrycodes": "br",
-    }
+    headers = {"User-Agent": "BrazilAddressRiskBot/2.0 (riskified.com)"}
+    params = {"q": address_str, "format": "json", "limit": 1, "countrycodes": "br"}
     try:
         r = requests.get(
             "https://nominatim.openstreetmap.org/search",
-            params=params,
-            headers=headers,
-            timeout=15,
+            params=params, headers=headers, timeout=15,
         )
         results = r.json()
         if results:
             return float(results[0]["lat"]), float(results[0]["lon"])
-        return None
     except Exception:
-        return None
+        pass
+    return None
 
 
 def get_municipal_pib(ibge_code: str) -> Optional[float]:
-    """
-    Fetch PIB per capita (R$) for a municipality via IBGE Sidra API.
-    Table 5938, variable 6575 (PIB per capita), period 2021.
-    """
     if not ibge_code or len(ibge_code) < 6:
         return None
     try:
-        url = (
-            "https://servicodados.ibge.gov.br/api/v3/agregados"
-            "/5938/periodos/2021/variaveis/6575"
-        )
         r = requests.get(
-            url,
+            "https://servicodados.ibge.gov.br/api/v3/agregados"
+            "/5938/periodos/2021/variaveis/6575",
             params={"localidades": f"N6[{ibge_code}]"},
             timeout=12,
         )
-        data = r.json()
-        value_str = (
-            data[0]["resultados"][0]["series"][0]["serie"].get("2021")
-        )
-        if value_str and value_str not in ("-", "..."):
-            return float(value_str)
-        return None
+        val = r.json()[0]["resultados"][0]["series"][0]["serie"].get("2021")
+        return float(val) if val and val not in ("-", "...") else None
     except Exception:
         return None
 
@@ -212,224 +187,146 @@ def get_municipal_pib(ibge_code: str) -> Optional[float]:
 # ============================================================
 
 def classify_socioeconomic(
-    pib_per_capita: Optional[float],
-    bairro: str,
-    cidade: str,
-    uf: str,
+    pib: Optional[float], bairro: str, cidade: str, uf: str
 ) -> Tuple[str, str]:
-    """
-    Returns (class_label, explanation_string).
-    Labels: A | B1 | B2 | C1 | C2 | D/E
-    """
-    text = normalize(f"{bairro} {cidade}")
+    txt = normalize(f"{bairro} {cidade}")
 
-    # Prestigious neighborhood → bump up
     for kw in PRESTIGIOUS_KEYWORDS:
-        if kw in text:
-            cls = "A" if (pib_per_capita and pib_per_capita >= 40000) else "B1"
-            return cls, f"Prestigious neighbourhood ({bairro}) — upper-income area"
+        if kw in txt:
+            cls = "A" if (pib and pib >= 40000) else "B1"
+            return cls, f"Prestigious neighbourhood ({bairro})"
 
-    # Informal settlement → pull down
-    for kw in HIGH_RISK_KEYWORDS[:25]:
-        if kw in text:
-            return "D/E", f"Informal settlement indicator in address ({kw})"
+    for kw in HIGH_RISK_KEYWORDS[:20]:
+        if kw in txt:
+            return "D/E", f"Informal settlement indicator: '{kw}'"
 
-    # PIB per capita thresholds (IBGE, in R$)
-    if pib_per_capita:
-        if pib_per_capita >= 65000:
-            return "A",   f"High PIB per capita: R${pib_per_capita:,.0f}/yr"
-        if pib_per_capita >= 45000:
-            return "B1",  f"Upper-middle PIB per capita: R${pib_per_capita:,.0f}/yr"
-        if pib_per_capita >= 28000:
-            return "B2",  f"Middle PIB per capita: R${pib_per_capita:,.0f}/yr"
-        if pib_per_capita >= 18000:
-            return "C1",  f"Lower-middle PIB per capita: R${pib_per_capita:,.0f}/yr"
-        if pib_per_capita >= 12000:
-            return "C2",  f"Lower PIB per capita: R${pib_per_capita:,.0f}/yr"
-        return "D/E", f"Low PIB per capita: R${pib_per_capita:,.0f}/yr"
+    for kw in RESTRICTED_BAIRROS:
+        if kw in txt:
+            return "D/E", f"Low-income restricted-delivery area: '{kw}'"
 
-    # City fallback (all keys pre-normalized)
-    cidade_map = {
-        "sao paulo": "B2", "rio de janeiro": "C1",
-        "brasilia": "B2", "curitiba": "B2", "porto alegre": "B2",
-        "florianopolis": "B2", "belo horizonte": "C1",
-        "vitoria": "B2", "goiania": "C1", "campinas": "B2",
-        "manaus": "C2", "belem": "C2", "recife": "C2",
-        "salvador": "C2", "fortaleza": "C2", "natal": "C2",
-        "joao pessoa": "C2", "maceio": "C2",
+    if pib:
+        if pib >= 65000: return "A",   f"High municipal PIB per capita: R${pib:,.0f}"
+        if pib >= 45000: return "B1",  f"Upper-middle PIB per capita: R${pib:,.0f}"
+        if pib >= 28000: return "B2",  f"Middle PIB per capita: R${pib:,.0f}"
+        if pib >= 18000: return "C1",  f"Lower-middle PIB per capita: R${pib:,.0f}"
+        if pib >= 12000: return "C2",  f"Low PIB per capita: R${pib:,.0f}"
+        return "D/E", f"Very low PIB per capita: R${pib:,.0f}"
+
+    city_map = {
+        "sao paulo": "B2", "rio de janeiro": "C1", "brasilia": "B2",
+        "curitiba": "B2", "porto alegre": "B2", "florianopolis": "B2",
+        "belo horizonte": "C1", "vitoria": "B2", "goiania": "C1",
+        "campinas": "B2", "manaus": "C2", "belem": "C2",
+        "recife": "C2", "salvador": "C2", "fortaleza": "C2",
+        "natal": "C2", "joao pessoa": "C2", "maceio": "C2",
         "teresina": "D/E", "sao luis": "D/E",
     }
-    for city, cls in cidade_map.items():
-        if city in text:
+    for city, cls in city_map.items():
+        if city in txt:
             return cls, f"Estimated from city baseline ({cidade})"
 
-    # State fallback
     state_map = {
         "SP": "B2", "RJ": "C1", "DF": "B1", "SC": "B2", "RS": "C1",
-        "PR": "B2", "MG": "C1", "GO": "C1", "ES": "C1", "MT": "C1",
-        "MS": "C1", "RO": "C2", "AM": "C2", "PA": "D/E", "MA": "D/E",
+        "PR": "B2", "MG": "C1", "GO": "C1", "ES": "C1",
         "CE": "C2", "PE": "C2", "BA": "C2", "PB": "C2", "RN": "C2",
-        "AL": "D/E", "SE": "C2", "PI": "D/E", "AC": "D/E",
-        "AP": "D/E", "RR": "D/E", "TO": "D/E",
+        "AM": "C2", "PA": "D/E", "MA": "D/E", "AL": "D/E",
+        "SE": "C2", "PI": "D/E", "AC": "D/E", "AP": "D/E", "TO": "D/E",
     }
-    cls = state_map.get(uf.upper() if uf else "", "C2")
+    cls = state_map.get((uf or "").upper(), "C2")
     return cls, f"Estimated from state baseline ({uf})"
 
 
 def assess_logistics_risk(
-    bairro: str,
-    cidade: str,
-    uf: str,
-    logradouro: str,
+    bairro: str, cidade: str, uf: str, logradouro: str
 ) -> Tuple[str, int, str]:
-    """
-    Returns (level, score_0_100, reason_string).
-    Level: Low | Medium | Medium-High | High
-    """
     score = 0
     reasons: List[str] = []
+    txt = normalize(f"{bairro} {cidade} {logradouro}")
 
-    text = normalize(f"{bairro} {cidade} {logradouro}")
-
-    # Prestigious area → strong negative signal
+    # Prestigious → reduce risk
     for kw in PRESTIGIOUS_KEYWORDS:
-        if kw in text:
+        if kw in txt:
             score = max(0, score - 20)
-            reasons.append(f"Prestigious area ({bairro}) — low delivery friction")
+            reasons.append(f"Prestigious area ({bairro})")
             break
 
-    # High-risk keywords (favelas, informal settlements)
-    matched = [kw for kw in HIGH_RISK_KEYWORDS if kw in text]
-    if matched:
-        score += 55
-        reasons.append(f'Informal/high-risk area indicator: "{matched[0]}"')
+    # Favela / informal settlement
+    matched_high = [kw for kw in HIGH_RISK_KEYWORDS if kw in txt]
+    if matched_high:
+        score += 60
+        reasons.append(f'Informal/high-risk area: "{matched_high[0]}"')
 
-    # Known restricted-delivery peripheral bairros
-    if not matched:
-        restricted = [kw for kw in RESTRICTED_DELIVERY_BAIRROS if kw in text]
-        if restricted:
-            score += 35
-            reasons.append(f'Known restricted-delivery area: "{restricted[0]}"')
+    # Restricted-delivery peripheral bairro
+    if not matched_high:
+        matched_rest = [kw for kw in RESTRICTED_BAIRROS if kw in txt]
+        if matched_rest:
+            score += 40
+            reasons.append(f'Restricted-delivery area: "{matched_rest[0]}"')
 
-    # State modifier
-    state_risk = STATE_RISK.get(uf.upper() if uf else "", "medium_low")
+    # State risk
+    state_risk = STATE_RISK.get((uf or "").upper(), "medium_low")
     if state_risk == "high":
-        score += 20
-        reasons.append(f"High-risk logistics state: {uf}")
+        score += 25; reasons.append(f"High-risk state ({uf})")
     elif state_risk == "medium":
-        score += 10
-        reasons.append(f"Moderate-risk state: {uf}")
-    elif state_risk == "low":
-        score = max(0, score - 5)
-
-    # Address completeness signals
-    if not logradouro or logradouro.strip() in ("", "-"):
-        score += 15
-        reasons.append("No street name (possibly rural/informal)")
-
-    if not bairro or bairro.strip() in ("", "-"):
-        score += 10
-        reasons.append("Missing neighbourhood")
-
-    if re.search(r"\bs/?n\b", text, re.IGNORECASE):
+        score += 15; reasons.append(f"Moderate-risk state ({uf})")
+    elif state_risk == "medium_low":
         score += 5
-        reasons.append("Address without number (S/N)")
+    # low → no change
+
+    # Address completeness
+    if not logradouro or normalize(logradouro) in ("", "-"):
+        score += 15; reasons.append("No street name")
+    if not bairro or normalize(bairro) in ("", "-"):
+        score += 10; reasons.append("Missing neighbourhood")
 
     score = min(100, max(0, score))
+    if score <= 20:   level = "Low"
+    elif score <= 45: level = "Medium"
+    elif score <= 65: level = "Medium-High"
+    else:             level = "High"
 
-    if score <= 25:
-        level = "Low"
-    elif score <= 50:
-        level = "Medium"
-    elif score <= 70:
-        level = "Medium-High"
-    else:
-        level = "High"
-
-    reason = " | ".join(reasons) if reasons else "No specific risk indicators found"
-    return level, score, reason
+    return level, score, (" | ".join(reasons) if reasons else "No specific risk flags")
 
 
 def assess_fraud_risk(
-    logistics_level: str,
-    ses_class: str,
-    address_complete: bool,
-    uf: str,
+    logistics_level: str, ses_class: str, complete: bool, uf: str
 ) -> Tuple[str, str]:
-    """Returns (fraud_level, explanation)."""
-    logistics_score = {"Low": 0, "Medium": 25, "Medium-High": 50, "High": 75}
-    ses_score = {"A": 0, "B1": 5, "B2": 15, "C1": 25, "C2": 35, "D/E": 55}
-    completeness_penalty = 0 if address_complete else 20
-
-    base = (
-        logistics_score.get(logistics_level, 25) * 0.45
-        + ses_score.get(ses_class, 30) * 0.35
-        + completeness_penalty * 0.20
-    )
-
-    # State adjustment
-    if uf and uf.upper() in ("RJ", "ES"):
-        base += 10
-    elif uf and uf.upper() in ("BA", "PE", "CE", "AL", "MA"):
-        base += 5
-
+    l = {"Low": 0, "Medium": 25, "Medium-High": 50, "High": 75}
+    s = {"A": 0, "B1": 5, "B2": 15, "C1": 25, "C2": 35, "D/E": 55}
+    c = 0 if complete else 20
+    base = l.get(logistics_level, 25) * 0.45 + s.get(ses_class, 30) * 0.35 + c * 0.20
+    if (uf or "").upper() in ("RJ", "ES"):     base += 10
+    elif (uf or "").upper() in ("BA", "PE", "CE", "AL", "MA"): base += 5
     base = min(100, max(0, base))
 
-    if base <= 20:
-        return "Low", "Address profile is consistent with legitimate orders"
-    if base <= 40:
-        return "Medium", "Moderate risk — verify details on high-value orders"
-    if base <= 60:
-        return "Medium-High", "Elevated risk — logistics + socioeconomic signals combined"
-    return "High", "High-risk profile — multiple negative indicators detected"
+    if base <= 20: return "Low",         "Address profile consistent with legitimate orders"
+    if base <= 40: return "Medium",      "Moderate risk — verify details on high-value orders"
+    if base <= 60: return "Medium-High", "Elevated risk — multiple negative signals combined"
+    return         "High",               "High-risk profile — multiple negative indicators"
 
 
-def generate_recommendation(
-    fraud_level: str,
-    logistics_level: str,
-) -> Tuple[str, str, str]:
-    """Returns (icon, short_label, detail)."""
+def generate_recommendation(fraud: str, logistics: str) -> Tuple[str, str, str]:
     highs = {"High", "Medium-High"}
-
-    if logistics_level == "High" and fraud_level == "High":
-        return (
-            "🚫", "Not worth the risk",
-            "Critical risk on both logistics and fraud dimensions. "
-            "Recommend decline unless additional strong verification is available.",
-        )
-    if logistics_level == "High" and fraud_level in highs:
-        return (
-            "🚫", "Not worth the risk",
-            "High logistics risk (potential Área de Risco / restricted delivery) "
-            "combined with elevated fraud profile. Recommend decline.",
-        )
-    if fraud_level == "High":
-        return (
-            "⚠️", "Risky approval",
-            "High fraud risk detected. If approving, ensure the order value is low "
-            "and require additional identity verification.",
-        )
-    if fraud_level == "Medium-High" and logistics_level in highs:
-        return (
-            "⚠️", "Depends on the amount",
-            "Moderate-high risk on both dimensions. "
-            "Approve low-value orders; decline or manually review orders above R$300.",
-        )
-    if fraud_level == "Medium-High" or logistics_level == "Medium-High":
-        return (
-            "⚠️", "Depends on the amount",
-            "Elevated risk profile. Consider order value: "
-            "routine approvals for small amounts, flag larger ones for review.",
-        )
-    if fraud_level == "Medium" and logistics_level == "Medium":
-        return (
-            "🟡", "Approve with standard checks",
-            "Moderate risk — within normal parameters. Standard fraud checks apply.",
-        )
-    return (
-        "✅", "You can feel confident approving",
-        "Address profile is within acceptable risk parameters. No major red flags detected.",
-    )
+    if logistics == "High" and fraud == "High":
+        return "🚫", "Not worth the risk", \
+            "Critical risk on both dimensions. Recommend decline unless strong additional verification."
+    if logistics == "High" and fraud in highs:
+        return "🚫", "Not worth the risk", \
+            "High logistics risk (Área de Risco / restricted delivery) + elevated fraud. Recommend decline."
+    if fraud == "High":
+        return "⚠️", "Risky approval", \
+            "High fraud risk. If approving, keep order value low and require identity verification."
+    if fraud == "Medium-High" and logistics in highs:
+        return "⚠️", "Depends on the amount", \
+            "Moderate-high risk on both dimensions. Approve small orders; decline or review R$300+."
+    if fraud == "Medium-High" or logistics == "Medium-High":
+        return "⚠️", "Depends on the amount", \
+            "Elevated risk profile. Routine approvals for small amounts; flag larger ones."
+    if fraud == "Medium" and logistics == "Medium":
+        return "🟡", "Approve with standard checks", \
+            "Within normal risk parameters. Standard fraud checks apply."
+    return "✅", "You can feel confident approving", \
+        "Address profile is within acceptable risk parameters. No major red flags."
 
 
 # ============================================================
@@ -437,268 +334,232 @@ def generate_recommendation(
 # ============================================================
 
 def analyze_address(raw: str) -> Dict[str, Any]:
-    """Run full analysis pipeline on a single raw address string."""
-    result: Dict[str, Any] = {
-        "input": raw,
-        "validated_address": raw,
-        "cep": None,
-        "logradouro": "",
-        "bairro": "",
-        "cidade": "",
-        "uf": "",
-        "ibge_code": None,
-        "pib_per_capita": None,
-        "coordinates": None,
-        "ses_class": None,
-        "ses_explanation": None,
-        "logistics_level": None,
-        "logistics_score": None,
-        "logistics_reason": None,
-        "fraud_level": None,
-        "fraud_explanation": None,
-        "rec_icon": None,
-        "rec_label": None,
-        "rec_detail": None,
-        "api_sources": [],
-        "errors": [],
+    r: Dict[str, Any] = {
+        "input": raw, "validated_address": raw,
+        "cep": None, "logradouro": "", "bairro": "", "cidade": "", "uf": "",
+        "ibge_code": None, "pib_per_capita": None, "coordinates": None,
+        "ses_class": None, "ses_explanation": None,
+        "logistics_level": None, "logistics_score": None, "logistics_reason": None,
+        "fraud_level": None, "fraud_explanation": None,
+        "rec_icon": None, "rec_label": None, "rec_detail": None,
+        "api_sources": [], "errors": [],
     }
 
-    # ---- Step 1: CEP lookup ----
+    # 1 — CEP lookup
     cep = extract_cep(raw)
     cep_data = None
     if cep:
         cep_data = lookup_cep(cep)
         if cep_data:
-            result["cep"] = cep_data.get("cep", "")
-            result["logradouro"] = cep_data.get("logradouro", "")
-            result["bairro"] = cep_data.get("bairro", "")
-            result["cidade"] = cep_data.get("localidade", "")
-            result["uf"] = cep_data.get("uf", "")
-            result["ibge_code"] = cep_data.get("ibge", "")
-            result["validated_address"] = (
-                f"{result['logradouro']}, {result['bairro']}, "
-                f"{result['cidade']}, {result['uf']}"
+            r["cep"]        = cep_data.get("cep", "")
+            r["logradouro"] = cep_data.get("logradouro", "")
+            r["bairro"]     = cep_data.get("bairro", "")
+            r["cidade"]     = cep_data.get("localidade", "")
+            r["uf"]         = cep_data.get("uf", "")
+            r["ibge_code"]  = cep_data.get("ibge", "")
+            r["validated_address"] = (
+                f"{r['logradouro']}, {r['bairro']}, {r['cidade']}, {r['uf']}"
             )
-            result["api_sources"].append("ViaCEP")
+            r["api_sources"].append("ViaCEP")
 
-    # ---- Step 2: Parse if no CEP data ----
+    # 2 — Parse raw if no CEP
     if not cep_data:
         parts = [p.strip() for p in raw.split(",")]
-        if len(parts) >= 2:
-            result["cidade"] = parts[-2] if len(parts) >= 2 else ""
-        state_match = re.search(r"\b([A-Z]{2})\b", raw)
-        if state_match:
-            result["uf"] = state_match.group(1)
         if len(parts) >= 3:
-            result["bairro"] = parts[-3]
+            r["bairro"] = parts[-3]
+        if len(parts) >= 2:
+            r["cidade"] = parts[-2]
+        m = re.search(r"\b([A-Z]{2})\b", raw)
+        if m:
+            r["uf"] = m.group(1)
 
-    # ---- Step 3: Geocode ----
-    coords = geocode_address(result["validated_address"])
+    # 3 — Geocode
+    coords = geocode_address(r["validated_address"])
     if coords:
-        result["coordinates"] = coords
-        result["api_sources"].append("OpenStreetMap")
+        r["coordinates"] = coords
+        r["api_sources"].append("OpenStreetMap")
     else:
-        result["errors"].append("Geocoding failed — map unavailable")
+        r["errors"].append("Geocoding failed")
 
-    # ---- Step 4: IBGE PIB ----
-    if result["ibge_code"]:
-        pib = get_municipal_pib(result["ibge_code"])
+    # 4 — IBGE PIB
+    if r["ibge_code"]:
+        pib = get_municipal_pib(r["ibge_code"])
         if pib:
-            result["pib_per_capita"] = pib
-            result["api_sources"].append("IBGE")
+            r["pib_per_capita"] = pib
+            r["api_sources"].append("IBGE")
 
-    # ---- Step 5: Socioeconomic ----
-    ses_class, ses_exp = classify_socioeconomic(
-        result["pib_per_capita"],
-        result["bairro"],
-        result["cidade"],
-        result["uf"],
+    # 5 — Socioeconomic
+    r["ses_class"], r["ses_explanation"] = classify_socioeconomic(
+        r["pib_per_capita"], r["bairro"], r["cidade"], r["uf"]
     )
-    result["ses_class"] = ses_class
-    result["ses_explanation"] = ses_exp
 
-    # ---- Step 6: Logistics ----
-    logi_level, logi_score, logi_reason = assess_logistics_risk(
-        result["bairro"],
-        result["cidade"],
-        result["uf"],
-        result["logradouro"] or raw,
+    # 6 — Logistics
+    r["logistics_level"], r["logistics_score"], r["logistics_reason"] = assess_logistics_risk(
+        r["bairro"], r["cidade"], r["uf"], r["logradouro"] or raw
     )
-    result["logistics_level"] = logi_level
-    result["logistics_score"] = logi_score
-    result["logistics_reason"] = logi_reason
 
-    # ---- Step 7: Fraud ----
-    complete = bool(result["bairro"] and result["cidade"] and result["uf"])
-    fraud_level, fraud_exp = assess_fraud_risk(
-        logi_level, ses_class, complete, result["uf"]
+    # 7 — Fraud
+    complete = bool(r["bairro"] and r["cidade"] and r["uf"])
+    r["fraud_level"], r["fraud_explanation"] = assess_fraud_risk(
+        r["logistics_level"], r["ses_class"], complete, r["uf"]
     )
-    result["fraud_level"] = fraud_level
-    result["fraud_explanation"] = fraud_exp
 
-    # ---- Step 8: Recommendation ----
-    icon, label, detail = generate_recommendation(fraud_level, logi_level)
-    result["rec_icon"] = icon
-    result["rec_label"] = label
-    result["rec_detail"] = detail
+    # 8 — Recommendation
+    r["rec_icon"], r["rec_label"], r["rec_detail"] = generate_recommendation(
+        r["fraud_level"], r["logistics_level"]
+    )
 
-    return result
+    return r
 
 
 # ============================================================
-# UI HELPERS
+# MAP  (Leaflet.js — no extra package needed)
 # ============================================================
 
-CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+def render_map(lat: float, lon: float, address: str) -> None:
+    escaped = address.replace("'", "\\'")
+    html = f"""
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <div id="map" style="height:380px; border-radius:10px; overflow:hidden;"></div>
+    <script>
+      var map = L.map('map').setView([{lat}, {lon}], 16);
+      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
+        {{attribution:'© OpenStreetMap'}}).addTo(map);
+      L.marker([{lat}, {lon}]).addTo(map)
+        .bindPopup('{escaped}').openPopup();
+    </script>
+    """
+    components.html(html, height=395)
 
+
+# ============================================================
+# RESULT CARD
+# ============================================================
+
+CSS = """<style>
 .metric-card {
-    background: #16213e;
-    border-radius: 10px;
-    padding: 18px 16px;
-    text-align: center;
-    border-top: 4px solid;
-    height: 100%;
+    background: #16213e; border-radius: 10px; padding: 18px 16px;
+    text-align: center; border-top: 4px solid; height: 100%;
 }
-.metric-label { font-size: 0.7em; color: #888; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
-.metric-value { font-size: 1.35em; font-weight: 700; margin-bottom: 2px; }
-.metric-sub   { font-size: 0.75em; color: #aaa; }
-
-.address-header {
-    background: #1a1a2e;
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin-bottom: 16px;
-    border-left: 4px solid #4a90d9;
+.metric-label { font-size:.7em; color:#888; text-transform:uppercase;
+    letter-spacing:.08em; margin-bottom:6px; }
+.metric-value { font-size:1.35em; font-weight:700; margin-bottom:2px; }
+.metric-sub   { font-size:.75em; color:#aaa; }
+.addr-box {
+    background:#1a1a2e; border-radius:10px; padding:16px 20px;
+    margin-bottom:16px; border-left:4px solid #4a90d9;
 }
-
-.rec-box {
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin-top: 18px;
-    border: 2px solid;
-}
-
-.source-tag {
-    display: inline-block;
-    background: #2a2a3e;
-    color: #aaa;
-    border-radius: 10px;
-    padding: 1px 9px;
-    font-size: 0.72em;
-    margin: 1px 2px;
-}
-</style>
-"""
+.rec-box { border-radius:10px; padding:16px 20px; margin-top:18px; border:2px solid; }
+.src-tag { display:inline-block; background:#2a2a3e; color:#aaa;
+    border-radius:10px; padding:1px 9px; font-size:.72em; margin:1px 2px; }
+</style>"""
 
 
 def rc(level: str) -> str:
     return RISK_COLORS.get(level, "#888")
 
 
-def render_result(result: Dict) -> None:
-    ses  = result["ses_class"] or "?"
+def render_result(res: Dict) -> None:
+    ses      = res.get("ses_class") or "?"
     ses_meta = SOCIOECONOMIC_META.get(ses, {"color": "#888", "label": ses, "desc": ""})
-    logi = result["logistics_level"] or "?"
-    frau = result["fraud_level"] or "?"
+    logi     = res.get("logistics_level") or "?"
+    frau     = res.get("fraud_level") or "?"
+    icon     = res.get("rec_icon", "")
+    label    = res.get("rec_label", "")
+    detail   = res.get("rec_detail", "")
 
-    icon  = result["rec_icon"] or ""
-    label = result["rec_label"] or ""
-    detail= result["rec_detail"] or ""
-
-    rec_palette = {
-        "✅": ("#27ae60", "rgba(39,174,96,0.12)"),
-        "🟡": ("#f1c40f", "rgba(241,196,15,0.12)"),
-        "⚠️": ("#e67e22", "rgba(230,126,34,0.12)"),
-        "🚫": ("#e74c3c", "rgba(231,76,60,0.12)"),
+    rec_pal = {
+        "✅": ("#27ae60", "rgba(39,174,96,.12)"),
+        "🟡": ("#f1c40f", "rgba(241,196,15,.12)"),
+        "⚠️": ("#e67e22", "rgba(230,126,34,.12)"),
+        "🚫": ("#e74c3c", "rgba(231,76,60,.12)"),
     }
-    rb, rbg = rec_palette.get(icon, ("#888", "rgba(136,136,136,0.1)"))
+    rb, rbg = rec_pal.get(icon, ("#888", "rgba(136,136,136,.1)"))
 
-    sources_html = "".join(
-        f'<span class="source-tag">{s}</span>' for s in result.get("api_sources", [])
-    )
-    cep_str = f"CEP {result['cep']}  ·  " if result.get("cep") else ""
-    city_str = f"{result['cidade']}, {result['uf']}" if result.get("cidade") else ""
+    srcs = "".join(f'<span class="src-tag">{s}</span>' for s in res.get("api_sources", []))
+    cep_s  = f"CEP {res['cep']}  ·  " if res.get("cep") else ""
+    city_s = f"{res['cidade']}, {res['uf']}" if res.get("cidade") else ""
 
     st.markdown(f"""
-    <div class="address-header">
-        <div style="font-size:1.05em; font-weight:600; color:#eee;">
-            📍 {result['validated_address']}
+    <div class="addr-box">
+        <div style="font-size:1.05em;font-weight:600;color:#eee;">
+            📍 {res['validated_address']}
         </div>
-        <div style="font-size:0.8em; color:#666; margin-top:4px;">
-            {cep_str}{city_str} &nbsp;&nbsp; {sources_html}
+        <div style="font-size:.8em;color:#666;margin-top:4px;">
+            {cep_s}{city_s}&nbsp;&nbsp;{srcs}
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     c1, c2, c3, c4 = st.columns(4)
-
     with c1:
-        st.markdown(f"""
-        <div class="metric-card" style="border-color:{ses_meta['color']}">
+        st.markdown(f"""<div class="metric-card" style="border-color:{ses_meta['color']}">
             <div class="metric-label">Socio-Economic</div>
             <div class="metric-value" style="color:{ses_meta['color']}">{ses_meta['label']}</div>
             <div class="metric-sub">{ses_meta['desc']}</div>
         </div>""", unsafe_allow_html=True)
-
     with c2:
-        logi_color = rc(logi)
-        st.markdown(f"""
-        <div class="metric-card" style="border-color:{logi_color}">
+        lc = rc(logi)
+        st.markdown(f"""<div class="metric-card" style="border-color:{lc}">
             <div class="metric-label">Logistics Risk</div>
-            <div class="metric-value" style="color:{logi_color}">{logi}</div>
-            <div class="metric-sub">Score {result.get('logistics_score', 0)}/100</div>
+            <div class="metric-value" style="color:{lc}">{logi}</div>
+            <div class="metric-sub">Score {res.get('logistics_score',0)}/100</div>
         </div>""", unsafe_allow_html=True)
-
     with c3:
-        frau_color = rc(frau)
-        frau_sub = (result.get("fraud_explanation") or "")[:40] + "…"
-        st.markdown(f"""
-        <div class="metric-card" style="border-color:{frau_color}">
+        fc = rc(frau)
+        fsub = (res.get("fraud_explanation") or "")[:40] + "…"
+        st.markdown(f"""<div class="metric-card" style="border-color:{fc}">
             <div class="metric-label">Fraud Risk</div>
-            <div class="metric-value" style="color:{frau_color}">{frau}</div>
-            <div class="metric-sub">{frau_sub}</div>
+            <div class="metric-value" style="color:{fc}">{frau}</div>
+            <div class="metric-sub">{fsub}</div>
         </div>""", unsafe_allow_html=True)
-
     with c4:
-        st.markdown(f"""
-        <div class="metric-card" style="border-color:{rb}">
+        st.markdown(f"""<div class="metric-card" style="border-color:{rb}">
             <div class="metric-label">Recommendation</div>
-            <div class="metric-value" style="color:{rb}; font-size:1em;">{icon} {label}</div>
+            <div class="metric-value" style="color:{rb};font-size:1em;">{icon} {label}</div>
         </div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
     with st.expander("📊 Risk breakdown"):
-        st.markdown(f"**Socioeconomic:** `{ses}` — {result.get('ses_explanation','')}")
-        pib = result.get("pib_per_capita")
-        if pib:
-            st.markdown(f"**Municipal PIB per capita (IBGE 2021):** R$ {pib:,.0f}/year")
-        st.markdown(f"**Logistics risk reason:** {result.get('logistics_reason','')}")
-        st.markdown(f"**Fraud assessment:** {result.get('fraud_explanation','')}")
-        if result.get("errors"):
-            st.warning("⚠️ " + " | ".join(result["errors"]))
+        st.markdown(f"**Socioeconomic:** `{ses}` — {res.get('ses_explanation','')}")
+        if res.get("pib_per_capita"):
+            st.markdown(f"**Municipal PIB per capita (IBGE 2021):** R$ {res['pib_per_capita']:,.0f}/year")
+        st.markdown(f"**Logistics reason:** {res.get('logistics_reason','')}")
+        st.markdown(f"**Fraud assessment:** {res.get('fraud_explanation','')}")
+        if res.get("errors"):
+            st.warning("⚠️ " + " | ".join(res["errors"]))
 
     st.markdown(f"""
-    <div class="rec-box" style="border-color:{rb}; background:{rbg}">
-        <strong style="color:{rb}; font-size:1.05em;">{icon} {label}</strong>
-        <p style="color:#ccc; margin:6px 0 0; font-size:0.88em;">{detail}</p>
-    </div>
-    """, unsafe_allow_html=True)
+    <div class="rec-box" style="border-color:{rb};background:{rbg}">
+        <strong style="color:{rb};font-size:1.05em;">{icon} {label}</strong>
+        <p style="color:#ccc;margin:6px 0 0;font-size:.88em;">{detail}</p>
+    </div>""", unsafe_allow_html=True)
 
-    if result.get("coordinates"):
+    # Map + Street View
+    coords = res.get("coordinates")
+    if coords:
+        lat, lon = coords
         st.markdown("#### 🗺️ Location")
-        lat, lon = result["coordinates"]
-        m = folium.Map(location=[lat, lon], zoom_start=15, tiles="OpenStreetMap")
-        folium.Marker(
-            [lat, lon],
-            popup=result["validated_address"],
-            tooltip=result["validated_address"],
-            icon=folium.Icon(color="red", icon="info-sign"),
-        ).add_to(m)
-        st_folium(m, width="100%", height=360)
+        col_map, col_sv = st.columns([4, 1])
+        with col_map:
+            render_map(lat, lon, res["validated_address"])
+        with col_sv:
+            sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
+            gmaps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+            st.markdown(f"""
+            <div style="padding:12px 0">
+                <a href="{sv_url}" target="_blank"
+                   style="display:block;background:#e67e22;color:white;padding:10px 16px;
+                   border-radius:8px;text-decoration:none;text-align:center;margin-bottom:10px;font-weight:600;">
+                   📸 Street View
+                </a>
+                <a href="{gmaps_url}" target="_blank"
+                   style="display:block;background:#4a90d9;color:white;padding:10px 16px;
+                   border-radius:8px;text-decoration:none;text-align:center;font-weight:600;">
+                   🗺️ Open in Maps
+                </a>
+            </div>""", unsafe_allow_html=True)
 
 
 # ============================================================
@@ -708,44 +569,39 @@ def render_result(result: Dict) -> None:
 def render_sidebar() -> None:
     with st.sidebar:
         st.markdown("## 🇧🇷 Brazil Address Risk Bot")
-        st.markdown("---")
+        st.divider()
         st.markdown("""
-**Data Sources (all free, no API key):**
+**Data Sources** (free, no API key)
 
 | Source | Data |
 |---|---|
 | [ViaCEP](https://viacep.com.br) | CEP → address |
-| [IBGE Sidra](https://servicodados.ibge.gov.br) | Municipal PIB per capita |
-| [Nominatim](https://nominatim.openstreetmap.org) | Geocoding / map |
-        """)
-        st.markdown("---")
+| [IBGE](https://servicodados.ibge.gov.br) | Municipal PIB |
+| [Nominatim](https://nominatim.openstreetmap.org) | Geocoding |
+| OpenStreetMap | Map tiles |
+| Google Maps | Street View link |
+""")
+        st.divider()
         st.markdown("""
-**Risk scoring logic:**
+**Scoring logic**
 
-- **Socio-Economic** — IBGE PIB per capita + neighbourhood keyword matching
-- **Logistics Risk** — "Área de risco" keywords, state baseline, address completeness
-- **Fraud Risk** — weighted composite of all signals + state factor
-
----
-**To run locally:**
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-        """)
-        st.markdown("---")
-        st.caption("⚠️ Risk scores are statistical signals, not definitive verdicts. Always combine with other fraud signals.")
+- **Socio-Economic** — IBGE PIB + keyword matching
+- **Logistics** — Área de Risco keywords, restricted-delivery bairros, state baseline
+- **Fraud** — Composite: 45% logistics + 35% SES + 20% completeness + state factor
+""")
+        st.divider()
+        st.caption("⚠️ Risk scores are statistical signals. Always combine with other fraud signals.")
 
 
 # ============================================================
-# MAIN APP
+# MAIN
 # ============================================================
 
 EXAMPLES = [
     "Rua Ataíde Ferreira, Pavuna, Rio de Janeiro, RJ 21510-370",
-    "01310-100",  # Av. Paulista CEP
+    "01310-100",
     "Rua Marquês de São Vicente, 209, Gávea, Rio de Janeiro, RJ",
-    "Rua das Rosas, Morro do Alemão, Rio de Janeiro, RJ",
+    "Morro do Alemão, Rio de Janeiro, RJ",
     "Av. Brigadeiro Faria Lima, Itaim Bibi, São Paulo, SP",
 ]
 
@@ -755,133 +611,128 @@ def main() -> None:
     render_sidebar()
 
     st.markdown(
-        "<h1 style='text-align:center; margin-bottom:4px;'>🇧🇷 Brazil Address Risk Bot</h1>"
-        "<p style='text-align:center; color:#888; margin-bottom:28px;'>"
-        "Socioeconomic classification · Logistics risk · Fraud assessment</p>",
+        "<h1 style='text-align:center;margin-bottom:4px;'>🇧🇷 Brazil Address Risk Bot</h1>"
+        "<p style='text-align:center;color:#888;margin-bottom:28px;'>"
+        "Socioeconomic · Logistics Risk · Fraud Assessment</p>",
         unsafe_allow_html=True,
     )
 
-    tab_single, tab_bulk = st.tabs(["🔍 Single Address", "📁 Bulk CSV Upload"])
+    tab_single, tab_bulk = st.tabs(["🔍 Single Address", "📁 Bulk CSV"])
 
-    # ── TAB 1 ──────────────────────────────────────────────
+    # ── SINGLE ADDRESS ──────────────────────────────────────
     with tab_single:
-        # Pre-fill box when an example is clicked
-        if "addr_val" not in st.session_state:
-            st.session_state.addr_val = ""
+        # Session state init
+        if "addr_input" not in st.session_state:
+            st.session_state.addr_input = ""
+        if "last_result" not in st.session_state:
+            st.session_state.last_result = None
 
+        # Quick examples
         st.markdown("**Quick examples:**")
-        cols = st.columns(len(EXAMPLES))
+        ecols = st.columns(len(EXAMPLES))
         for i, ex in enumerate(EXAMPLES):
-            with cols[i]:
-                label = ex[:28] + "…" if len(ex) > 28 else ex
-                if st.button(label, key=f"ex{i}", use_container_width=True, help=ex):
-                    st.session_state.addr_val = ex
+            lbl = ex[:28] + "…" if len(ex) > 28 else ex
+            with ecols[i]:
+                if st.button(lbl, key=f"ex{i}", use_container_width=True, help=ex):
+                    st.session_state.addr_input = ex
+                    st.rerun()
 
-        # Form ensures input + button are always submitted together
-        with st.form("address_form", clear_on_submit=False):
-            addr_input = st.text_input(
+        # Input + button — key binds text box to session state
+        col_in, col_btn = st.columns([6, 1])
+        with col_in:
+            st.text_input(
                 "Address",
-                value=st.session_state.addr_val,
+                key="addr_input",
                 placeholder="e.g. Rua Ataíde Ferreira, Pavuna, Rio de Janeiro, RJ  or just the CEP",
                 label_visibility="collapsed",
             )
-            run = st.form_submit_button("Analyze →", type="primary", use_container_width=False)
+        with col_btn:
+            run = st.button("Analyze →", type="primary", use_container_width=True)
 
-        if run and addr_input:
-            st.session_state.addr_val = addr_input  # persist typed value
-            with st.spinner("Fetching data and scoring…"):
-                res = analyze_address(addr_input)
-            st.session_state.last_result = res
+        # Analyze on button click
+        if run:
+            current = st.session_state.addr_input.strip()
+            if current:
+                with st.spinner("Fetching data and scoring…"):
+                    res = analyze_address(current)
+                st.session_state.last_result = res
+            else:
+                st.warning("Please enter an address first.")
 
-        if st.session_state.get("last_result"):
+        # Always render last result
+        if st.session_state.last_result:
             st.divider()
             render_result(st.session_state.last_result)
 
-    # ── TAB 2 ──────────────────────────────────────────────
+    # ── BULK CSV ────────────────────────────────────────────
     with tab_bulk:
         st.markdown("#### Upload a CSV with an `address` column")
         st.markdown(
-            "Accepted column names: `address`, `endereco`, `endereço`, `addr`  \n"
-            "Any extra columns (order ID, amount, etc.) are preserved in the output."
+            "Accepted column names: `address`, `endereco`, `addr`  \n"
+            "Extra columns are preserved in the output."
         )
 
-        # Template download
         tmpl = pd.DataFrame({
             "address": EXAMPLES,
             "order_id": [f"ORD-{i+1:03d}" for i in range(len(EXAMPLES))],
-            "amount": [299.99, 1499.0, 89.90, 450.0, 2200.0],
+            "amount":   [299.99, 1499.0, 89.90, 450.0, 2200.0],
         })
-        st.download_button(
-            "📥 Download CSV template",
-            data=tmpl.to_csv(index=False),
-            file_name="address_template.csv",
-            mime="text/csv",
-        )
+        st.download_button("📥 Download CSV template", tmpl.to_csv(index=False),
+                           "address_template.csv", "text/csv")
 
         uploaded = st.file_uploader("Upload CSV", type=["csv"])
-
         if uploaded:
             df = pd.read_csv(uploaded)
             addr_col = next(
-                (c for c in df.columns if c.lower().strip() in ("address", "endereco", "endereço", "addr")),
+                (c for c in df.columns if c.lower().strip() in ("address","endereco","endereço","addr")),
                 None,
             )
             if not addr_col:
                 st.error("❌ No recognised address column found. Rename it to `address`.")
                 st.dataframe(df.head())
             else:
-                st.success(f"✅ {len(df)} rows  ·  address column: **{addr_col}**")
-
+                st.success(f"✅ {len(df)} rows  ·  column: **{addr_col}**")
                 if st.button("🚀 Run bulk analysis", type="primary"):
-                    prog = st.progress(0)
+                    prog   = st.progress(0)
                     status = st.empty()
-                    rows = []
-
+                    rows   = []
                     for i, row in df.iterrows():
                         addr = str(row[addr_col])
                         status.text(f"Analyzing {i+1}/{len(df)}: {addr[:70]}…")
                         res = analyze_address(addr)
                         rows.append({
-                            "address_input":      addr,
-                            "validated_address":  res.get("validated_address", ""),
-                            "cep":                res.get("cep", ""),
-                            "bairro":             res.get("bairro", ""),
-                            "cidade":             res.get("cidade", ""),
-                            "uf":                 res.get("uf", ""),
-                            "socioeconomic":      res.get("ses_class", ""),
-                            "logistics_risk":     res.get("logistics_level", ""),
-                            "logistics_score":    res.get("logistics_score", 0),
-                            "fraud_risk":         res.get("fraud_level", ""),
-                            "recommendation":     res.get("rec_label", ""),
+                            "address_input":     addr,
+                            "validated_address": res.get("validated_address",""),
+                            "cep":               res.get("cep",""),
+                            "bairro":            res.get("bairro",""),
+                            "cidade":            res.get("cidade",""),
+                            "uf":                res.get("uf",""),
+                            "socioeconomic":     res.get("ses_class",""),
+                            "logistics_risk":    res.get("logistics_level",""),
+                            "logistics_score":   res.get("logistics_score",0),
+                            "fraud_risk":        res.get("fraud_level",""),
+                            "recommendation":    res.get("rec_label",""),
                         })
-                        prog.progress((i + 1) / len(df))
-                        # Respect Nominatim's 1 req/sec rate limit
-                        if i < len(df) - 1:
-                            time.sleep(1.1)
+                        prog.progress((i+1)/len(df))
+                        if i < len(df)-1:
+                            time.sleep(1.1)  # Nominatim rate limit
 
                     status.text("✅ Done!")
                     out = pd.DataFrame(rows)
-                    extra_cols = [c for c in df.columns if c != addr_col]
-                    if extra_cols:
-                        out = pd.concat(
-                            [out, df[extra_cols].reset_index(drop=True)], axis=1
-                        )
-
+                    extra = [c for c in df.columns if c != addr_col]
+                    if extra:
+                        out = pd.concat([out, df[extra].reset_index(drop=True)], axis=1)
                     st.dataframe(out, use_container_width=True)
-
                     ts = datetime.now().strftime("%Y%m%d_%H%M")
                     st.download_button(
-                        "📥 Download results CSV",
-                        data=out.to_csv(index=False),
-                        file_name=f"brazil_risk_analysis_{ts}.csv",
-                        mime="text/csv",
+                        "📥 Download results", out.to_csv(index=False),
+                        f"brazil_risk_{ts}.csv", "text/csv",
                     )
 
-    # Footer
     st.divider()
     st.markdown(
-        "<p style='text-align:center; color:#444; font-size:0.78em;'>"
-        "Sources: ViaCEP · IBGE Sidra · OpenStreetMap/Nominatim  ·  "
+        "<p style='text-align:center;color:#444;font-size:.78em;'>"
+        "Sources: ViaCEP · IBGE · OpenStreetMap  ·  "
         "Risk scores are statistical signals — use as one input among many."
         "</p>",
         unsafe_allow_html=True,
