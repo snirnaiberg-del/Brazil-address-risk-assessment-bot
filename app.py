@@ -16,8 +16,14 @@ Data Sources:
 import re
 import time
 import json
+import unicodedata
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List
+
+
+def normalize(text: str) -> str:
+    """Remove accents and lowercase — so 'Alemão' == 'alemao'."""
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
 
 import streamlit as st
 import requests
@@ -39,74 +45,53 @@ st.set_page_config(
 # RISK DATA
 # ============================================================
 
-HIGH_RISK_KEYWORDS: List[str] = [
-    # Generic informal settlement terms
+# All keyword lists are pre-normalized (no accents, lowercase)
+# so matching works regardless of how the user types the address.
+HIGH_RISK_KEYWORDS: List[str] = [normalize(k) for k in [
     "favela", "comunidade", "complexo do", "morro do", "morro da", "morro de",
-    "área de risco", "area de risco", "loteamento irregular", "invasão", "invasao",
-    # RJ specific
-    "rocinha", "alemão", "alemao", "manguinhos", "maré", "mare",
-    "jacarezinho", "jacaré", "jacare", "acari", "mandela", "cidade de deus",
-    "cidade alta", "vigário geral", "vigario geral", "parada de lucas",
-    "serrinha", "dendê", "dende", "grotão", "grotao",
-    "caramujo", "fallet", "fogueteiro", "santa marta", "tabajara",
-    "cantagalo", "pavãozinho", "pavaozinho",
-    "vila kennedy", "vila aliança", "vila alianca",
-    "nova brasília", "nova brasilia",
-    "parque união", "parque uniao", "nova holanda",
-    "ramos favela", "barreira do vasco", "barreira do joão", "barreira do joao",
-    "chatuba", "fazendinha bairro", "grota favela",
-    # SP specific
-    "heliópolis", "heliopolis", "paraisópolis", "paraisopolis",
-    "jardim ângela", "jardim angela", "capão redondo", "capao redondo",
-    "m'boi mirim", "mboi mirim", "brasilândia", "brasilandia",
-    "cidade tiradentes", "jardim campo limpo",
-    "pirituba favela", "são miguel paulista favela",
-    # General Brazil
-    "morro comunidade", "morro favela",
-]
-
-# Known restricted-delivery bairros that aren't classic favelas
-# (Correios PNAAR areas, high-crime peripheral zones)
-RESTRICTED_DELIVERY_BAIRROS: List[str] = [
-    # RJ west/north zone
-    "pavuna", "acari", "anchieta", "bangu", "realengo",
-    "paciência", "paciencia", "santa cruz", "cosmos", "campo grande zona",
-    "senador vasconcelos", "inhoaíba", "inhoaiba", "pedra de guaratiba",
-    "sepetiba", "ilha de guaratiba", "guaratiba zona",
-    "madureira", "oswaldo cruz", "quintino bocaiuva", "bento ribeiro",
-    "campinho", "cascadura", "cavalcante bairro", "engenheiro leal",
-    "honório gurgel", "honorio gurgel", "irajá", "iraja",
-    "piedade bairro", "pilares", "rocha bairro", "rocha miranda",
-    "colégio bairro", "colegio bairro", "vicente de carvalho",
-    "vila da penha", "vista alegre bairro", "turiaçu", "turiacu",
-    "vaz lobo", "vigário geral", "vigario geral", "coelho neto bairro",
-    "barros filho bairro", "costa barros", "cordovil", "jardim américa rj",
-    "jardim america rj", "parada de lucas", "penha bairro",
-    # SP periphery
-    "jardim ângela", "jardim angela", "capão redondo", "capao redondo",
-    "cidade tiradentes", "guaianazes", "iguatemi sp", "lajeado sp",
-    "sapopemba", "são mateus sp", "sao mateus sp", "jardim helena",
-    "vila curuçá", "vila curuça", "itaim paulista",
-    "parelheiros", "marsilac", "grajaú", "grajau",
-    # Other high-risk peripheries
-    "aglomerado da serra", "morro das pedras bh",
-]
-
-PRESTIGIOUS_KEYWORDS: List[str] = [
+    "area de risco", "loteamento irregular", "invasao",
     # RJ
-    "ipanema", "leblon", "gávea", "gavea", "lagoa rodrigo de freitas",
-    "barra da tijuca", "botafogo", "urca", "alto leblon", "são conrado", "sao conrado",
-    "joatinga", "itanhangá", "itanhanga", "recreio dos bandeirantes",
+    "rocinha", "alemao", "manguinhos", "mare", "jacarezinho", "jacare",
+    "acari", "mandela", "cidade de deus", "cidade alta", "vigario geral",
+    "parada de lucas", "serrinha", "dendê", "grotao",
+    "caramujo", "fallet", "fogueteiro", "santa marta favela", "tabajara",
+    "cantagalo favela", "pavaozinho", "vila kennedy", "vila alianca",
+    "nova brasilia rj", "parque uniao rj", "nova holanda",
+    "ramos favela", "barreira do vasco", "chatuba",
     # SP
-    "jardins", "jardim paulista", "jardim europa", "jardim america",
-    "higienópolis", "higienopolis", "itaim bibi", "vila nova conceição",
-    "vila nova conceicao", "moema", "brooklin", "alphaville",
+    "heliopolis", "paraisopolis", "jardim angela", "capao redondo",
+    "mboi mirim", "brasilandia", "cidade tiradentes", "jardim campo limpo",
+]]
+
+RESTRICTED_DELIVERY_BAIRROS: List[str] = [normalize(k) for k in [
+    # RJ
+    "pavuna", "acari", "anchieta", "bangu", "realengo", "paciencia",
+    "santa cruz rj", "cosmos rj", "senador vasconcelos", "inhoaiba",
+    "pedra de guaratiba", "sepetiba", "madureira", "oswaldo cruz rj",
+    "quintino bocaiuva", "bento ribeiro", "campinho rj", "cascadura",
+    "honorio gurgel", "iraja", "piedade rj", "pilares rj",
+    "vicente de carvalho rj", "vila da penha", "turiacu", "vaz lobo",
+    "costa barros", "cordovil rj", "penha rj",
+    # SP
+    "jardim angela", "capao redondo", "cidade tiradentes", "guaianazes",
+    "lajeado sp", "sapopemba", "jardim helena sp", "itaim paulista",
+    "parelheiros", "grajau sp",
+]]
+
+PRESTIGIOUS_KEYWORDS: List[str] = [normalize(k) for k in [
+    # RJ
+    "ipanema", "leblon", "gavea", "lagoa rodrigo de freitas",
+    "barra da tijuca", "botafogo", "urca", "sao conrado",
+    "joatinga", "itanhanga", "recreio dos bandeirantes",
+    # SP
+    "jardins sp", "jardim paulista", "jardim europa",
+    "higienopolis", "itaim bibi", "vila nova conceicao",
+    "moema", "brooklin", "alphaville sp",
     # BH
-    "savassi", "lourdes", "funcionários", "funcionarios", "belvedere",
-    "mangabeiras",
+    "savassi", "lourdes bh", "belvedere bh", "mangabeiras bh",
     # Curitiba
-    "batel", "água verde", "agua verde",
-]
+    "batel", "agua verde curitiba",
+]]
 
 # State baseline logistics/fraud risk
 STATE_RISK: Dict[str, str] = {
@@ -236,7 +221,7 @@ def classify_socioeconomic(
     Returns (class_label, explanation_string).
     Labels: A | B1 | B2 | C1 | C2 | D/E
     """
-    text = f"{bairro} {cidade}".lower()
+    text = normalize(f"{bairro} {cidade}")
 
     # Prestigious neighborhood → bump up
     for kw in PRESTIGIOUS_KEYWORDS:
@@ -263,20 +248,16 @@ def classify_socioeconomic(
             return "C2",  f"Lower PIB per capita: R${pib_per_capita:,.0f}/yr"
         return "D/E", f"Low PIB per capita: R${pib_per_capita:,.0f}/yr"
 
-    # City fallback
+    # City fallback (all keys pre-normalized)
     cidade_map = {
-        "são paulo": "B2", "sao paulo": "B2",
-        "rio de janeiro": "C1",
-        "brasília": "B2", "brasilia": "B2",
-        "curitiba": "B2", "porto alegre": "B2",
-        "florianópolis": "B2", "florianopolis": "B2",
-        "belo horizonte": "C1", "vitória": "B2", "vitoria": "B2",
-        "goiânia": "C1", "goiania": "C1", "campinas": "B2",
-        "manaus": "C2", "belém": "C2", "belem": "C2",
-        "recife": "C2", "salvador": "C2", "fortaleza": "C2",
-        "natal": "C2", "joão pessoa": "C2", "joao pessoa": "C2",
-        "maceió": "C2", "maceio": "C2",
-        "teresina": "D/E", "são luís": "D/E", "sao luis": "D/E",
+        "sao paulo": "B2", "rio de janeiro": "C1",
+        "brasilia": "B2", "curitiba": "B2", "porto alegre": "B2",
+        "florianopolis": "B2", "belo horizonte": "C1",
+        "vitoria": "B2", "goiania": "C1", "campinas": "B2",
+        "manaus": "C2", "belem": "C2", "recife": "C2",
+        "salvador": "C2", "fortaleza": "C2", "natal": "C2",
+        "joao pessoa": "C2", "maceio": "C2",
+        "teresina": "D/E", "sao luis": "D/E",
     }
     for city, cls in cidade_map.items():
         if city in text:
@@ -308,7 +289,7 @@ def assess_logistics_risk(
     score = 0
     reasons: List[str] = []
 
-    text = f"{bairro} {cidade} {logradouro}".lower()
+    text = normalize(f"{bairro} {cidade} {logradouro}")
 
     # Prestigious area → strong negative signal
     for kw in PRESTIGIOUS_KEYWORDS:
