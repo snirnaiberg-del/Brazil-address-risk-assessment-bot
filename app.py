@@ -305,37 +305,109 @@ def assess_fraud_risk(
     return         "High",               "High-risk profile — multiple negative indicators"
 
 
-def generate_recommendation(fraud: str, logistics: str) -> Tuple[str, str, str]:
+def generate_recommendation(
+    fraud: str, logistics: str, amount: float = 0.0
+) -> Tuple[str, str, str]:
+    """
+    Amount tiers (R$):
+      micro  < 80      → permissive — exposure is minimal
+      low    80–299    → standard logic
+      mid    300–799   → tighter; medium = caution, medium-high = decline
+      high   800–2000  → strict; any non-low = caution/decline
+      vhigh  > 2000    → only fully clean addresses pass
+    """
     highs = {"High", "Medium-High"}
-    if logistics == "High" and fraud == "High":
-        return "🚫", "Not worth the risk", \
-            "Critical risk on both dimensions. Recommend decline unless strong additional verification."
-    if logistics == "High" and fraud in highs:
-        return "🚫", "Not worth the risk", \
-            "High logistics risk (Área de Risco / restricted delivery) + elevated fraud. Recommend decline."
-    if fraud == "High":
-        return "⚠️", "Risky approval", \
-            "High fraud risk. If approving, keep order value low and require identity verification."
-    if fraud == "Medium-High" and logistics in highs:
-        return "⚠️", "Depends on the amount", \
-            "Moderate-high risk on both dimensions. Approve small orders; decline or review R$300+."
-    if fraud == "Medium-High" or logistics == "Medium-High":
-        return "⚠️", "Depends on the amount", \
-            "Elevated risk profile. Routine approvals for small amounts; flag larger ones."
-    if fraud == "Medium" and logistics == "Medium":
-        return "🟡", "Approve with standard checks", \
-            "Within normal risk parameters. Standard fraud checks apply."
-    return "✅", "You can feel confident approving", \
-        "Address profile is within acceptable risk parameters. No major red flags."
+    amt_note = f" (order: R${amount:,.2f})" if amount > 0 else ""
+
+    # ── Derive a numeric risk score for cleaner amount logic ──
+    risk_score = {"Low": 0, "Medium": 1, "Medium-High": 2, "High": 3}
+    combined = risk_score.get(fraud, 1) + risk_score.get(logistics, 1)
+    # combined: 0=clean, 1-2=moderate, 3-4=elevated, 5-6=critical
+
+    # ── Micro orders (< R$80) — permissive ────────────────
+    if 0 < amount < 80:
+        if combined >= 5:
+            return "⚠️", "Risky approval" + amt_note, \
+                "High-risk address, but the very low order value reduces exposure. " \
+                "Approve with monitoring."
+        if combined >= 3:
+            return "🟡", "Approve with caution" + amt_note, \
+                "Elevated risk area but low order amount limits exposure."
+        return "✅", "You can feel confident approving" + amt_note, \
+            "Low-risk profile and low order value."
+
+    # ── Very high orders (> R$2,000) — strict ─────────────
+    if amount > 2000:
+        if combined >= 3:
+            return "🚫", "Not worth the risk" + amt_note, \
+                f"Very high-value order (R${amount:,.0f}) — only approve fully clean address profiles. " \
+                "This address has elevated risk signals."
+        if combined >= 1:
+            return "⚠️", "Risky approval" + amt_note, \
+                f"High-value order (R${amount:,.0f}). Address has moderate risk — manual review required."
+        return "✅", "You can feel confident approving" + amt_note, \
+            f"Clean address profile for a R${amount:,.0f} order. Proceed."
+
+    # ── High orders (R$800–2,000) ──────────────────────────
+    if amount >= 800:
+        if combined >= 4:
+            return "🚫", "Not worth the risk" + amt_note, \
+                f"High-value order (R${amount:,.0f}) at a high-risk address. Recommend decline."
+        if combined >= 2:
+            return "⚠️", "Risky approval" + amt_note, \
+                f"Non-trivial risk at R${amount:,.0f}. Verify identity and delivery address."
+        if combined >= 1:
+            return "🟡", "Approve with standard checks" + amt_note, \
+                f"Moderate signal at R${amount:,.0f}. Standard verification recommended."
+        return "✅", "You can feel confident approving" + amt_note, \
+            f"Low-risk address for R${amount:,.0f} order."
+
+    # ── Mid orders (R$300–799) ─────────────────────────────
+    if amount >= 300:
+        if combined >= 4:
+            return "🚫", "Not worth the risk" + amt_note, \
+                f"High risk with R${amount:,.0f} order. Recommend decline."
+        if combined >= 2:
+            return "⚠️", "Depends on the amount" + amt_note, \
+                f"Elevated risk. For R${amount:,.0f}, verify identity before approving."
+        if combined == 1:
+            return "🟡", "Approve with standard checks" + amt_note, \
+                f"Moderate risk profile with R${amount:,.0f}. Standard checks apply."
+        return "✅", "You can feel confident approving" + amt_note, \
+            f"Clean profile for R${amount:,.0f} order."
+
+    # ── Standard orders (R$80–299) or no amount entered ───
+    if combined >= 5:
+        return "🚫", "Not worth the risk" + amt_note, \
+            "Critical risk on both logistics and fraud dimensions. Recommend decline."
+    if combined >= 4:
+        return "🚫", "Not worth the risk" + amt_note, \
+            "High logistics + high fraud signals. Recommend decline."
+    if combined >= 3:
+        return "⚠️", "Risky approval" + amt_note, \
+            "Elevated risk profile. Require additional verification."
+    if combined >= 2:
+        return "⚠️", "Depends on the amount" + amt_note, \
+            "Moderate-elevated risk. Consider order value carefully."
+    if combined == 1:
+        return "🟡", "Approve with standard checks" + amt_note, \
+            "Moderate risk — within normal parameters. Standard checks apply."
+    return "✅", "You can feel confident approving" + amt_note, \
+        "Address profile is within acceptable risk parameters."
 
 
 # ============================================================
 # ORCHESTRATION
 # ============================================================
 
-def analyze_address(raw: str) -> Dict[str, Any]:
+def analyze_address(
+    raw: str,
+    merchant: str = "",
+    amount: float = 0.0,
+) -> Dict[str, Any]:
     r: Dict[str, Any] = {
         "input": raw, "validated_address": raw,
+        "merchant": merchant, "amount": amount,
         "cep": None, "logradouro": "", "bairro": "", "cidade": "", "uf": "",
         "ibge_code": None, "pib_per_capita": None, "coordinates": None,
         "ses_class": None, "ses_explanation": None,
@@ -404,9 +476,9 @@ def analyze_address(raw: str) -> Dict[str, Any]:
         r["logistics_level"], r["ses_class"], complete, r["uf"]
     )
 
-    # 8 — Recommendation
+    # 8 — Recommendation (amount-aware)
     r["rec_icon"], r["rec_label"], r["rec_detail"] = generate_recommendation(
-        r["fraud_level"], r["logistics_level"]
+        r["fraud_level"], r["logistics_level"], amount
     )
 
     return r
@@ -478,17 +550,21 @@ def render_result(res: Dict) -> None:
     rb, rbg = rec_pal.get(icon, ("#888", "rgba(136,136,136,.1)"))
 
     srcs = "".join(f'<span class="src-tag">{s}</span>' for s in res.get("api_sources", []))
-    cep_s  = f"CEP {res['cep']}  ·  " if res.get("cep") else ""
-    city_s = f"{res['cidade']}, {res['uf']}" if res.get("cidade") else ""
+    cep_s      = f"CEP {res['cep']}  ·  " if res.get("cep") else ""
+    city_s     = f"{res['cidade']}, {res['uf']}" if res.get("cidade") else ""
+    merchant_s = f"<b>{res['merchant']}</b>  ·  " if res.get("merchant") else ""
+    amount_val = res.get("amount", 0)
+    amount_s   = f"<span style='color:#f1c40f;font-weight:600;'>R$ {amount_val:,.2f}</span>  ·  " if amount_val else ""
 
     st.markdown(f"""
     <div class="addr-box">
         <div style="font-size:1.05em;font-weight:600;color:#eee;">
             📍 {res['validated_address']}
         </div>
-        <div style="font-size:.8em;color:#666;margin-top:4px;">
-            {cep_s}{city_s}&nbsp;&nbsp;{srcs}
+        <div style="font-size:.85em;color:#aaa;margin-top:6px;">
+            {merchant_s}{amount_s}{cep_s}{city_s}
         </div>
+        <div style="font-size:.75em;color:#555;margin-top:4px;">{srcs}</div>
     </div>""", unsafe_allow_html=True)
 
     c1, c2, c3, c4 = st.columns(4)
@@ -637,24 +713,43 @@ def main() -> None:
                     st.session_state.addr_input = ex
                     st.rerun()
 
-        # Input + button — key binds text box to session state
-        col_in, col_btn = st.columns([6, 1])
-        with col_in:
+        # ── Input fields ──────────────────────────────────────
+        col_addr, col_merchant, col_amount = st.columns([4, 2, 1])
+        with col_addr:
             st.text_input(
                 "Address",
                 key="addr_input",
-                placeholder="e.g. Rua Ataíde Ferreira, Pavuna, Rio de Janeiro, RJ  or just the CEP",
-                label_visibility="collapsed",
+                placeholder="e.g. Rua Ataíde Ferreira, Pavuna, Rio de Janeiro, RJ  or CEP",
+                label_visibility="visible",
             )
-        with col_btn:
-            run = st.button("Analyze →", type="primary", use_container_width=True)
+        with col_merchant:
+            st.text_input(
+                "Merchant Name",
+                key="merchant_input",
+                placeholder="e.g. Loja XYZ",
+            )
+        with col_amount:
+            st.number_input(
+                "Order Amount (R$)",
+                key="amount_input",
+                min_value=0.0,
+                value=0.0,
+                step=50.0,
+                format="%.2f",
+            )
+
+        run = st.button("🔍 Analyze →", type="primary")
 
         # Analyze on button click
         if run:
             current = st.session_state.addr_input.strip()
             if current:
                 with st.spinner("Fetching data and scoring…"):
-                    res = analyze_address(current)
+                    res = analyze_address(
+                        current,
+                        merchant=st.session_state.get("merchant_input", ""),
+                        amount=float(st.session_state.get("amount_input", 0) or 0),
+                    )
                 st.session_state.last_result = res
             else:
                 st.warning("Please enter an address first.")
@@ -699,9 +794,15 @@ def main() -> None:
                     for i, row in df.iterrows():
                         addr = str(row[addr_col])
                         status.text(f"Analyzing {i+1}/{len(df)}: {addr[:70]}…")
-                        res = analyze_address(addr)
+                        merchant_col = next((c for c in df.columns if c.lower() in ("merchant","merchant_name","loja")), None)
+                        amount_col   = next((c for c in df.columns if c.lower() in ("amount","valor","order_amount","preco")), None)
+                        merchant_val = str(row[merchant_col]) if merchant_col else ""
+                        amount_val   = float(row[amount_col]) if amount_col else 0.0
+                        res = analyze_address(addr, merchant=merchant_val, amount=amount_val)
                         rows.append({
                             "address_input":     addr,
+                            "merchant":          merchant_val,
+                            "amount_brl":        amount_val,
                             "validated_address": res.get("validated_address",""),
                             "cep":               res.get("cep",""),
                             "bairro":            res.get("bairro",""),
